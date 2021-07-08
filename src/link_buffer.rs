@@ -2,7 +2,7 @@ use std::{intrinsics::copy_nonoverlapping, mem::take};
 
 use memmap2::MmapMut;
 
-use crate::MacroAssembler;
+use crate::macro_assembler::MacroAssembler;
 
 /// LinkBuffer:
 ///
@@ -108,9 +108,9 @@ impl LinkBuffer {
         }
         unsafe {
             copy_nonoverlapping(
-                masm.buffer().data.as_ptr(),
+                masm.buffer().data(),
                 self.code as *mut u8,
-                masm.buffer().data.len(),
+                masm.buffer().code_size(),
             );
         }
         self.link_tasks = masm.take_link_tasks();
