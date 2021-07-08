@@ -22,21 +22,21 @@ pub enum RegisterID {
     EDI,
 
     #[cfg(target_arch = "x86_64")]
-    RAX,
+    EAX,
     #[cfg(target_arch = "x86_64")]
-    RCX,
+    ECX,
     #[cfg(target_arch = "x86_64")]
-    RDX,
+    EDX,
     #[cfg(target_arch = "x86_64")]
-    RBX,
+    EBX,
     #[cfg(target_arch = "x86_64")]
-    RSP,
+    ESP,
     #[cfg(target_arch = "x86_64")]
-    RBP,
+    EBP,
     #[cfg(target_arch = "x86_64")]
-    RSI,
+    ESI,
     #[cfg(target_arch = "x86_64")]
-    RDI,
+    EDI,
     #[cfg(target_arch = "x86_64")]
     R8,
     #[cfg(target_arch = "x86_64")]
@@ -54,6 +54,7 @@ pub enum RegisterID {
     #[cfg(target_arch = "x86_64")]
     R15,
 }
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum FPRegisterID {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -86,6 +87,24 @@ pub enum FPRegisterID {
     XMM14,
     #[cfg(target_arch = "x86_64")]
     XMM15,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn reg_requires_rex(reg: u8) -> bool {
+    reg >= RegisterID::R8 as u8
+}
+#[cfg(target_arch = "x86_64")]
+pub fn byte_reg_requires_rex(reg: u8) -> bool {
+    reg >= RegisterID::ESP as u8
+}
+
+#[cfg(target_arch = "x86")]
+fn byte_reg_requires_rex(_reg: u8) -> bool {
+    false
+}
+#[cfg(target_arch = "x86")]
+fn reg_requires_rex(_reg: u8) -> bool {
+    false
 }
 
 macro_rules! c {
@@ -266,6 +285,14 @@ pub enum VexImpliedBytes {
     TwoBytesOp3A = 3,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(C)]
+pub enum ModRmMode {
+    NoDisp = 0,
+    Disp8 = 1 << 6,
+    Disp32 = 2 << 6,
+    Register = 3 << 6,
+}
 pub struct X86Condition(pub u8);
 
 impl X86Condition {
@@ -361,6 +388,40 @@ pub struct X86AssemblerFormatter {
 }
 
 impl X86AssemblerFormatter {
+    pub const HAS_SIB: RegisterID = RegisterID::ESP;
+    pub const NO_BASE: RegisterID = RegisterID::EBP;
+    pub const NO_INDEX: RegisterID = RegisterID::ESP;
+
+    #[cfg(target_arch = "x86_64")]
+    pub const NO_BASE2: RegisterID = RegisterID::R13;
+    #[cfg(target_arch = "x86_64")]
+    pub const HAS_SIB2: RegisterID = RegisterID::R12;
+    #[cfg(target_arch = "x86_64")]
+    pub fn emit_rex(&mut self, w: bool, r: u8, x: u8, b: u8) {
+        self.put_byte_unchecked(
+            PRE_REX as u8 | ((w as u8) << 3) | ((r >> 3) << 2) | ((x >> 3) << 1) | (b >> 3),
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn emit_rexw(&mut self, r: u8, x: u8, b: u8) {
+        self.emit_rex(true, r, x, b);
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn emit_rex_if(&mut self, condition: bool, r: u8, x: u8, b: u8) {
+        if condition {
+            self.emit_rex(false, r, x, b);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn emit_rex_if_needed(&mut self, r: u8, x: u8, b: u8) {
+        self.emit_rex_if(reg_requires_rex(r | x | b), r, x, b);
+    }
+
+    #[cfg(target_arch = "x86")]
+    pub fn emit_rex_if(&mut self, _: bool, _: u8, _: u8, _: u8) {}
+    #[cfg(target_arch = "x86")]
+    pub fn emit_rex_if_needed(&mut self, _: u8, _: u8, _: u8) {}
+
     pub fn debug_offset(&self) -> usize {
         self.buffer.debug_offset()
     }
@@ -380,6 +441,27 @@ impl X86AssemblerFormatter {
     pub fn code_size(&self) -> usize {
         self.buffer.code_size()
     }
+
+    pub fn put_modrm(&mut self, mode: ModRmMode, reg: u8, rm: RegisterID) {
+        self.put_byte_unchecked(mode as u8 | ((reg & 7) << 3) | (rm as u8 & 7));
+    }
+
+    pub fn put_modrm_sib(
+        &mut self,
+        mode: ModRmMode,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+    ) {
+        self.put_modrm(mode, reg, Self::HAS_SIB);
+        self.put_byte_unchecked((scale << 6) | ((index as u8 & 7) << 3) | (base as u8 & 7));
+    }
+
+    pub fn register_modrm(&mut self, reg: u8, rm: RegisterID) {
+        self.put_modrm(ModRmMode::Register, reg, rm);
+    }
+
     // Immediates:
     //
     // An immediate should be appended where appropriate after an op has been emitted.
