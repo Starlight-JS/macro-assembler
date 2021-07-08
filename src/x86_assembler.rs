@@ -462,6 +462,268 @@ impl X86AssemblerFormatter {
         self.put_modrm(ModRmMode::Register, reg, rm);
     }
 
+    pub fn memory_modrm(&mut self, reg: u8, base: RegisterID, offset: i32) {
+        #[cfg(target_arch = "x86_64")]
+        let cond = base == Self::HAS_SIB || base == Self::HAS_SIB2;
+        #[cfg(target_arch = "x86")]
+        let cond = base == Self::HAS_SIB;
+        if cond {
+            if offset == 0 {
+                self.put_modrm_sib(ModRmMode::NoDisp, reg, base, Self::NO_INDEX as _, 0);
+            } else if offset as i8 as i32 == offset {
+                self.put_modrm_sib(ModRmMode::Disp8, reg, base, Self::NO_INDEX as _, 0);
+                self.put_byte_unchecked(offset as i8);
+            } else {
+                self.put_modrm_sib(ModRmMode::Disp32, reg, base, Self::NO_INDEX as _, 0);
+                self.put_int_unchecked(offset);
+            }
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            let cond = offset == 0 && (base != Self::NO_BASE) && (base != Self::NO_BASE2);
+            #[cfg(target_arch = "x86")]
+            let cond = offset == 0 && base != Self::NO_BASE;
+            if cond {
+                self.put_modrm(ModRmMode::NoDisp, reg, base);
+            } else if offset as i8 as i32 == offset {
+                self.put_modrm(ModRmMode::Disp8, reg, base);
+                self.put_byte_unchecked(offset as i8);
+            } else {
+                self.put_modrm(ModRmMode::Disp32, reg, base);
+                self.put_int_unchecked(offset);
+            }
+        }
+    }
+
+    pub fn memory_modrm_disp8(&mut self, reg: u8, base: RegisterID, offset: i32) {
+        assert_eq!(offset as i8 as i32, offset);
+        #[cfg(target_arch = "x86_64")]
+        let cond = base == Self::HAS_SIB || base == Self::HAS_SIB2;
+        #[cfg(target_arch = "x86")]
+        let cond = base == Self::HAS_SIB;
+
+        if cond {
+            self.put_modrm_sib(ModRmMode::Disp8, reg, base, Self::NO_INDEX, 0);
+            self.put_byte_unchecked(offset as i8);
+        } else {
+            self.put_modrm(ModRmMode::Disp8, reg, base);
+            self.put_byte_unchecked(offset as i8);
+        }
+    }
+    pub fn memory_modrm_disp32(&mut self, reg: u8, base: RegisterID, offset: i32) {
+        #[cfg(target_arch = "x86_64")]
+        let cond = base == Self::HAS_SIB || base == Self::HAS_SIB2;
+        #[cfg(target_arch = "x86")]
+        let cond = base == Self::HAS_SIB;
+
+        if cond {
+            self.put_modrm_sib(ModRmMode::Disp32, reg, base, Self::NO_INDEX, 0);
+            self.put_int_unchecked(offset);
+        } else {
+            self.put_modrm(ModRmMode::Disp32, reg, base);
+            self.put_int_unchecked(offset);
+        }
+    }
+
+    pub fn memory_modrm_scale(
+        &mut self,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        let cond = offset == 0 && (base != Self::NO_BASE) && (base != Self::NO_BASE2);
+        #[cfg(target_arch = "x86")]
+        let cond = offset == 0 && base != Self::NO_BASE;
+        if cond {
+            self.put_modrm_sib(ModRmMode::NoDisp, reg, base, index, scale)
+        } else if offset as i8 as i32 == offset {
+            self.put_modrm_sib(ModRmMode::Disp8, reg, base, index, scale);
+            self.put_byte_unchecked(offset as i8);
+        } else {
+            self.put_modrm_sib(ModRmMode::Disp32, reg, base, index, scale);
+            self.put_int_unchecked(offset);
+        }
+    }
+
+    pub fn memory_modrm_addr(&mut self, reg: u8, address: u32) {
+        #[cfg(target_arch = "x86_64")]
+        self.put_modrm_sib(ModRmMode::NoDisp, reg, Self::NO_BASE, Self::NO_INDEX, 0);
+        #[cfg(target_arch = "x86")]
+        self.put_modrm(ModRmMode::NoDisp, reg, Self::NO_BASE);
+
+        self.put_int_unchecked(address);
+    }
+
+    pub fn two_bytes_vex(&mut self, simd_prefix: usize, in_op_reg: RegisterID, r: RegisterID) {
+        self.put_byte_unchecked(VexPrefix::TwoBytes as u8);
+        let mut second_byte = vex_encode_simd_prefix(simd_prefix);
+        second_byte |= (!(in_op_reg as u8) & 0xf) << 3;
+        second_byte |= !(reg_requires_rex(r as _) as u8) << 7;
+        self.put_byte_unchecked(second_byte);
+    }
+
+    pub fn three_bytes_vex_nds(
+        &mut self,
+        simd_prefix: usize,
+        implied_bytes: VexImpliedBytes,
+        r: RegisterID,
+        in_op_reg: RegisterID,
+        x: RegisterID,
+        b: RegisterID,
+    ) {
+        self.put_byte_unchecked(VexPrefix::ThreeBytes as u8);
+        let mut second_byte = implied_bytes as u8;
+        second_byte |= !(reg_requires_rex(r as _) as u8) << 7;
+        second_byte |= !(reg_requires_rex(x as _) as u8) << 6;
+        second_byte |= !(reg_requires_rex(b as _) as u8) << 5;
+        self.put_byte_unchecked(second_byte);
+        let mut third_byte = vex_encode_simd_prefix(simd_prefix);
+        third_byte |= (!(in_op_reg as u8) & 0xf) << 3;
+        self.put_byte_unchecked(third_byte);
+    }
+
+    pub fn three_bytes_vex_nds2(
+        &mut self,
+        simd_prefix: usize,
+        implied_bytes: VexImpliedBytes,
+        r: RegisterID,
+        in_op_reg: RegisterID,
+        b: RegisterID,
+    ) {
+        self.put_byte_unchecked(VexPrefix::ThreeBytes as u8);
+        let mut second_byte = implied_bytes as u8;
+        second_byte |= !(reg_requires_rex(r as _) as u8) << 7;
+        second_byte |= 1 << 6; // REX.X
+        second_byte |= !(reg_requires_rex(b as _) as u8) << 5;
+        self.put_byte_unchecked(second_byte);
+        let mut third_byte = vex_encode_simd_prefix(simd_prefix);
+        third_byte |= (!(in_op_reg as u8) & 0xf) << 3;
+        self.put_byte_unchecked(third_byte);
+    }
+    pub fn prefix(&mut self, pre: u8) {
+        self.buffer.put_byte(pre);
+    }
+    // Word-sized operands / no operand instruction formatters.
+    //
+    // In addition to the opcode, the following operand permutations are supported:
+    //   * None - instruction takes no operands.
+    //   * One register - the low three bits of the RegisterID are added into the opcode.
+    //   * Two registers - encode a register form ModRm (for all ModRm formats, the reg field is passed first, and a GroupOpcodeID may be passed in its place).
+    //   * Three argument ModRM - a register, and a register and an offset describing a memory operand.
+    //   * Five argument ModRM - a register, and a base register, an index, scale, and offset describing a memory operand.
+    //
+    // For 32-bit x86 targets, the address operand may also be provided as a void*.
+    // On 64-bit targets REX prefixes will be planted as necessary, where high numbered registers are used.
+    //
+    // The twoByteOp methods plant two-byte Intel instructions sequences (first opcode byte 0x0F).
+    pub fn one_byte_op(&mut self, op: u8) {
+        self.ensure_space(16);
+        self.put_byte_unchecked(op);
+    }
+
+    pub fn one_byte_op_r(&mut self, op: u8, reg: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(0, 0, reg as _);
+        self.put_byte_unchecked(op + (reg as u8 & 7));
+    }
+
+    pub fn one_byte_op_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg as _, 0, rm as _);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm);
+    }
+
+    pub fn one_byte_op_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset);
+    }
+    pub fn one_byte_op_mem32(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_disp32(reg, base, offset);
+    }
+
+    pub fn one_byte_op_mem8(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_disp8(reg, base, offset);
+    }
+
+    pub fn one_byte_op_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg as _, index as _, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+
+    pub fn one_byte_op_addr(&mut self, op: u8, reg: u8, address: u32) {
+        self.ensure_space(16);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_addr(reg, address)
+    }
+    pub fn two_byte_op(&mut self, op: u8) {
+        self.ensure_space(16);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+    }
+
+    pub fn two_byte_op_r(&mut self, op: u8, reg: u8) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(0, 0, reg);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+    }
+    pub fn two_byte_op_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, rm as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm)
+    }
+    pub fn two_byte_op_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset)
+    }
+    pub fn two_byte_op_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, index as _, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+    pub fn two_byte_op_addr(&mut self, op: u8, reg: u8, address: u32) {
+        self.ensure_space(16);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_addr(reg, address)
+    }
+
     // Immediates:
     //
     // An immediate should be appended where appropriate after an op has been emitted.
@@ -499,5 +761,14 @@ impl Deref for X86AssemblerFormatter {
 impl DerefMut for X86AssemblerFormatter {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.buffer
+    }
+}
+
+fn vex_encode_simd_prefix(simd_prefix: usize) -> u8 {
+    match simd_prefix {
+        0x66 => 1,
+        0xf3 => 2,
+        0xf2 => 3,
+        _ => unreachable!(),
     }
 }
