@@ -1,4 +1,7 @@
-use std::ops::{BitAnd, BitOr, Deref, DerefMut};
+use std::{
+    mem::swap,
+    ops::{BitAnd, BitOr, Deref, DerefMut},
+};
 
 use crate::assembler_buffer::{AssemblerBuffer, AssemblerLabel, Put};
 
@@ -723,7 +726,259 @@ impl X86AssemblerFormatter {
         self.put_byte_unchecked(op);
         self.memory_modrm_addr(reg, address)
     }
+    pub fn vex_nds_lig_wig_two_byte_op(
+        &mut self,
+        simd_prefix: usize,
+        op: u8,
+        dest: RegisterID,
+        a: RegisterID,
+        b: RegisterID,
+    ) {
+        self.ensure_space(16);
+        if reg_requires_rex(b as _) {
+            self.three_bytes_vex_nds2(simd_prefix, VexImpliedBytes::TwoBytesOp, dest, a, b);
+        } else {
+            self.two_bytes_vex(simd_prefix, a, dest);
+        }
 
+        self.put_byte_unchecked(op);
+        self.register_modrm(dest as _, b);
+    }
+
+    pub fn vex_nds_lig_wig_commutative_two_byte_op(
+        &mut self,
+        simd_prefix: usize,
+        op: u8,
+        dest: RegisterID,
+        mut a: RegisterID,
+        mut b: RegisterID,
+    ) {
+        if reg_requires_rex(b as _) {
+            swap(&mut a, &mut b);
+        }
+        self.vex_nds_lig_wig_two_byte_op(simd_prefix, op, dest, a, b)
+    }
+
+    pub fn vex_nds_lig_wig_two_byte_op_mem(
+        &mut self,
+        simd_prefix: usize,
+        op: u8,
+        dest: RegisterID,
+        a: RegisterID,
+        base: RegisterID,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        if reg_requires_rex(base as _) {
+            self.three_bytes_vex_nds2(simd_prefix, VexImpliedBytes::TwoBytesOp, dest, a, base);
+        } else {
+            self.two_bytes_vex(simd_prefix, a, dest);
+        }
+        self.put_byte_unchecked(op);
+        self.memory_modrm(dest as _, base, offset)
+    }
+
+    pub fn vex_nds_lig_wig_two_byte_op_mem_scale(
+        &mut self,
+        simd_prefix: usize,
+        op: u8,
+        dest: RegisterID,
+        a: RegisterID,
+
+        offset: i32,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+    ) {
+        self.ensure_space(16);
+        if reg_requires_rex(base as u8 | index as u8) {
+            self.three_bytes_vex_nds(
+                simd_prefix,
+                VexImpliedBytes::TwoBytesOp,
+                dest,
+                a,
+                index,
+                base,
+            );
+        } else {
+            self.two_bytes_vex(simd_prefix, a, dest);
+        }
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(dest as _, base, index, scale, offset)
+    }
+
+    pub fn three_byte_op(&mut self, prefix: u8, op: u8) {
+        self.ensure_space(16);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(prefix);
+        self.put_byte_unchecked(op);
+    }
+
+    pub fn three_byte_op_rr(&mut self, prefix: u8, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if_needed(reg, 0, rm as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(prefix);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm)
+    }
+
+    pub fn three_byte_op_disp(
+        &mut self,
+        prefix: u8,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        displacement: i32,
+    ) {
+        self.emit_rex_if_needed(reg, 0, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(prefix);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, displacement);
+    }
+    // Quad-word-sized operands:
+    //
+    // Used to format 64-bit operantions, planting a REX.w prefix.
+    // When planting d64 or f64 instructions, not requiring a REX.w prefix,
+    // the normal (non-'64'-postfixed) formatters should be used.
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64(&mut self, op: u8) {
+        self.ensure_space(16);
+        self.emit_rexw(0, 0, 0);
+        self.put_byte_unchecked(op);
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_r(&mut self, op: u8, r: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rexw(0, 0, r as _);
+        self.put_byte_unchecked(op);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, rm as _);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_mem_disp32(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_disp32(reg, base, offset)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_mem_disp8(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_disp8(reg, base, offset)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, index as _, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn one_byte_op64_addr(&mut self, op: u8, reg: u8, address: u32) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, 0);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_addr(reg, address)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn two_byte_op64_r(&mut self, op: u8, reg: u8) {
+        self.ensure_space(16);
+        self.emit_rexw(0, 0, reg);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op + (reg & 7))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn two_byte_op64_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, rm as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn two_byte_op64_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, 0, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn two_byte_op64_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rexw(reg, index as _, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+
+    // Byte-operands:
+    //
+    // These methods format byte operations.  Byte operations differ from the normal
+    // formatters in the circumstances under which they will decide to emit REX prefixes.
+    // These should be used where any register operand signifies a byte register.
+    //
+    // The disctinction is due to the handling of register numbers in the range 4..7 on
+    // x86-64.  These register numbers may either represent the second byte of the first
+    // four registers (ah..bh) or the first byte of the second four registers (spl..dil).
+    //
+    // Since ah..bh cannot be used in all permutations of operands (specifically cannot
+    // be accessed where a REX prefix is present), these are likely best treated as
+    // deprecated.  In order to ensure the correct registers spl..dil are selected a
+    // REX prefix will be emitted for any byte register operand in the range 4..15.
+    //
+    // These formatters may be used in instructions where a mix of operand sizes, in which
+    // case an unnecessary REX will be emitted, for example:
+    //     movzbl %al, %edi
+    // In this case a REX will be planted since edi is 7 (and were this a byte operand
+    // a REX would be required to specify dil instead of bh).  Unneeded REX prefixes will
+    // be silently ignored by the processor.
+    //
+    // Address operands should still be checked using regRequiresRex(), while byteRegRequiresRex()
+    // is provided to check byte register operands.
+    pub fn one_byte_op8_r(&mut self, op: u8, group: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if(reg_requires_rex(rm as _), 0, 0, rm as _);
+        self.put_byte_unchecked(op);
+        self.register_modrm(group, rm);
+    }
     // Immediates:
     //
     // An immediate should be appended where appropriate after an op has been emitted.
