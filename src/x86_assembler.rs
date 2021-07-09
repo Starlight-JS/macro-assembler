@@ -975,10 +975,89 @@ impl X86AssemblerFormatter {
     // is provided to check byte register operands.
     pub fn one_byte_op8_r(&mut self, op: u8, group: u8, rm: RegisterID) {
         self.ensure_space(16);
-        self.emit_rex_if(reg_requires_rex(rm as _), 0, 0, rm as _);
+        self.emit_rex_if(byte_reg_requires_rex(rm as _), 0, 0, rm as _);
         self.put_byte_unchecked(op);
         self.register_modrm(group, rm);
     }
+
+    pub fn one_byte_op8_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if(byte_reg_requires_rex(reg | rm as u8), reg, 0, rm as _);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm);
+    }
+
+    pub fn one_byte_op8_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if(byte_reg_requires_rex(reg | base as u8), reg, 0, base as _);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset)
+    }
+
+    pub fn one_byte_op8_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rex_if(
+            byte_reg_requires_rex(reg) || reg_requires_rex(index as u8 | base as u8),
+            reg,
+            index as _,
+            base as _,
+        );
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+    pub fn two_byte_op8_r(&mut self, op: u8, group: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if(byte_reg_requires_rex(rm as _), 0, 0, rm as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.register_modrm(group, rm);
+    }
+
+    pub fn two_byte_op8_rr(&mut self, op: u8, reg: u8, rm: RegisterID) {
+        self.ensure_space(16);
+        self.emit_rex_if(byte_reg_requires_rex(reg | rm as u8), reg, 0, rm as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.register_modrm(reg, rm);
+    }
+
+    pub fn two_byte_op8_mem(&mut self, op: u8, reg: u8, base: RegisterID, offset: i32) {
+        self.ensure_space(16);
+        self.emit_rex_if(byte_reg_requires_rex(reg | base as u8), reg, 0, base as _);
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm(reg, base, offset)
+    }
+
+    pub fn two_byte_op8_mem_scale(
+        &mut self,
+        op: u8,
+        reg: u8,
+        base: RegisterID,
+        index: RegisterID,
+        scale: u8,
+        offset: i32,
+    ) {
+        self.ensure_space(16);
+        self.emit_rex_if(
+            byte_reg_requires_rex(reg) || reg_requires_rex(index as u8 | base as u8),
+            reg,
+            index as _,
+            base as _,
+        );
+        self.put_byte_unchecked(OP_2BYTE_ESCAPE as u8);
+        self.put_byte_unchecked(op);
+        self.memory_modrm_scale(reg, base, index, scale, offset)
+    }
+
     // Immediates:
     //
     // An immediate should be appended where appropriate after an op has been emitted.
