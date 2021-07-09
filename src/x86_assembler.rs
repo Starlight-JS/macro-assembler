@@ -1,6 +1,7 @@
 use std::{
     mem::swap,
     ops::{BitAnd, BitOr, Deref, DerefMut},
+    ptr::write_unaligned,
 };
 
 use crate::assembler_buffer::{AssemblerBuffer, AssemblerLabel, Put};
@@ -113,7 +114,7 @@ fn reg_requires_rex(_reg: u8) -> bool {
 macro_rules! c {
     ($($id: ident = $val: expr),*) => {
 
-        $(#[allow(non_upper_case_globals)]pub const $id: usize = $val;)*
+        $(#[allow(non_upper_case_globals)]pub const $id: u8 = $val;)*
     };
 }
 // OneByteOpcodeID defines the bytecode for 1 byte instruction. It also contains the prefixes
@@ -334,15 +335,15 @@ impl BitAnd for X86Condition {
 }
 
 fn cmovcc(cond: X86Condition) -> usize {
-    OP2_CMOVCC + cond.0 as usize
+    OP2_CMOVCC as usize + cond.0 as usize
 }
 
 fn jcc_rel32(cond: X86Condition) -> usize {
-    OP2_JCC_rel32 + cond.0 as usize
+    OP2_JCC_rel32 as usize + cond.0 as usize
 }
 
 fn setcc_opcode(cond: X86Condition) -> usize {
-    OP_SETCC + cond.0 as usize
+    OP_SETCC as usize + cond.0 as usize
 }
 
 c! {
@@ -1104,5 +1105,211 @@ fn vex_encode_simd_prefix(simd_prefix: usize) -> u8 {
         0xf3 => 2,
         0xf2 => 3,
         _ => unreachable!(),
+    }
+}
+pub struct X86Assembler {
+    formatter: X86AssemblerFormatter,
+    index_of_last_watchpoint: i32,
+    index_of_tail_last_watchpoint: i32,
+}
+
+impl X86Assembler {
+    pub(crate) fn set_pointer(at: *mut u8, value: *mut u8) {
+        unsafe {
+            write_unaligned(at.cast::<*mut u8>().sub(1), value);
+        }
+    }
+    pub(crate) fn set_int32(at: *mut u8, value: i32) {
+        unsafe {
+            write_unaligned(at.cast::<i32>().sub(1), value);
+        }
+    }
+
+    pub(crate) fn set_int8(at: *mut u8, value: i8) {
+        unsafe {
+            write_unaligned(at.cast::<i8>().sub(1), value);
+        }
+    }
+    pub(crate) fn set_rel32(from: *mut u8, to: *mut u8) {
+        let offset = from as isize - to as isize;
+        assert!(offset as i32 as isize == offset);
+        Self::set_int32(from, offset as _);
+    }
+
+    pub fn fill_nops(base: *mut u8, mut size: usize) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            static NOPS: [&'static [u8]; 10] = [
+                // nop
+                &[0x90],
+                // xchg %ax,%ax
+                &[0x66, 0x90],
+                // nopl (%[re]ax)
+                &[0x0f, 0x1f, 0x00],
+                // nopl 8(%[re]ax)
+                &[0x0f, 0x1f, 0x40, 0x08],
+                // nopl 8(%[re]ax,%[re]ax,1)
+                &[0x0f, 0x1f, 0x44, 0x00, 0x08],
+                // nopw 8(%[re]ax,%[re]ax,1)
+                &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x08],
+                // nopl 512(%[re]ax)
+                &[0x0f, 0x1f, 0x80, 0x00, 0x02, 0x00, 0x00],
+                // nopl 512(%[re]ax,%[re]ax,1)
+                &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00],
+                // nopw 512(%[re]ax,%[re]ax,1)
+                &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00],
+                // nopw %cs:512(%[re]ax,%[re]ax,1)
+                &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x02, 0x00, 0x00],
+            ];
+
+            let mut at = base;
+            while size != 0 {
+                let nop_size = size.min(15);
+                let num_prefixes = if nop_size <= 10 { 0 } else { nop_size - 10 };
+                for _ in 0..=num_prefixes {
+                    at.write(0x66);
+                    at = at.add(1);
+                }
+                let nop_rest = nop_size - num_prefixes;
+                for i in 0..=nop_rest {
+                    at.write(NOPS[nop_rest - 1][i]);
+                    at = at.add(1);
+                }
+                size -= nop_size;
+            }
+        }
+        #[cfg(target_arch = "x86")]
+        unsafe {
+            core::ptr::write_bytes(base, OP_NOP as u8, size);
+        }
+    }
+
+    pub fn nop(&mut self) {
+        self.formatter.one_byte_op(OP_NOP);
+    }
+
+    pub fn debug_offset(&self) -> usize {
+        self.formatter.debug_offset()
+    }
+
+    pub fn get_difference_between_labels(a: AssemblerLabel, b: AssemblerLabel) -> i32 {
+        b.offset() as i32 - a.offset() as i32
+    }
+
+    pub fn get_relocate_address(code: *mut u8, label: AssemblerLabel) -> *mut u8 {
+        unsafe { code.add(label.offset() as _) }
+    }
+
+    pub fn get_call_return_offset(call: AssemblerLabel) -> u32 {
+        call.offset()
+    }
+
+    pub fn replace_with_address_computation(instruction_start: *mut u8) {
+        let mut ptr = instruction_start;
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            if (ptr.read() & !15) == PRE_REX {
+                ptr = ptr.add(1);
+            }
+            match ptr.read() {
+                OP_MOV_GvEv => ptr.write(OP_LEA),
+                OP_LEA => {}
+                _ => unreachable!(),
+            }
+        }
+    }
+    pub fn replace_with_load(instruction_start: *mut u8) {
+        let mut ptr = instruction_start;
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            if (ptr.read() & !15) == PRE_REX {
+                ptr = ptr.add(1);
+            }
+            match ptr.read() {
+                OP_MOV_GvEv => {}
+                OP_LEA => ptr.write(OP_MOV_GvEv),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    pub fn max_jump_replacement_size() -> usize {
+        5
+    }
+
+    pub fn patchable_jump_size() -> usize {
+        5
+    }
+
+    pub fn revert_jump_to_cmpl_im_force32(
+        instruction_start: *mut u8,
+        imm: i32,
+        _offset: i32,
+        dst: RegisterID,
+    ) {
+        let opcode_bytes = 1;
+        let mod_rm_bytes = 1;
+        unsafe {
+            let ptr = instruction_start;
+            ptr.write(OP_GROUP11_EvIz);
+            ptr.add(1)
+                .write(((ModRmMode::NoDisp as u8) << 6) | (GROUP1_OP_CMP << 3) | dst as u8);
+
+            let as_bytes = imm.to_ne_bytes();
+            for i in opcode_bytes + mod_rm_bytes..Self::max_jump_replacement_size() {
+                ptr.add(i).write(as_bytes[i - opcode_bytes - mod_rm_bytes]);
+            }
+        }
+    }
+    pub fn revert_jump_to_cmpl_ir_force32(
+        instruction_start: *mut u8,
+        imm: i32,
+        _offset: i32,
+        dst: RegisterID,
+    ) {
+        let opcode_bytes = 1;
+        let mod_rm_bytes = 1;
+        unsafe {
+            let ptr = instruction_start;
+            ptr.write(OP_GROUP11_EvIz);
+            ptr.add(1)
+                .write(((ModRmMode::Register as u8) << 6) | (GROUP1_OP_CMP << 3) | dst as u8);
+
+            let as_bytes = imm.to_ne_bytes();
+            for i in opcode_bytes + mod_rm_bytes..Self::max_jump_replacement_size() {
+                ptr.add(i).write(as_bytes[i - opcode_bytes - mod_rm_bytes]);
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn revert_jump_to_movq_i64r(instruction_start: *mut u8, imm: i64, dst: RegisterID) {
+        let instruction_size = 10;
+        let rex_bytes = 1;
+        let opcode_bytes = 1;
+        unsafe {
+            let ptr = instruction_start;
+            ptr.write(PRE_REX | (1 << 3) | (dst as u8 >> 3));
+            ptr.add(1).write(OP_MOV_EAXIv | (dst as u8 & 7));
+            let bytes = imm.to_ne_bytes();
+            for i in rex_bytes + opcode_bytes..instruction_size {
+                ptr.add(i).write(bytes[i - rex_bytes - opcode_bytes]);
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn revert_jump_to_movl_i32r(instruction_start: *mut u8, imm: i32, dst: RegisterID) {
+        let instruction_size = 6;
+        let rex_bytes = 1;
+        let opcode_bytes = 1;
+        unsafe {
+            let ptr = instruction_start;
+            ptr.write(PRE_REX | (dst as u8 >> 3));
+            ptr.add(1).write(OP_MOV_EAXIv | (dst as u8 & 7));
+
+            let bytes = imm.to_ne_bytes();
+            for i in rex_bytes + opcode_bytes..instruction_size {
+                ptr.add(i).write(bytes[i - rex_bytes - opcode_bytes]);
+            }
+        }
     }
 }

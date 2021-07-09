@@ -1,3 +1,4 @@
+#![allow(non_upper_case_globals)]
 pub mod assembler_buffer;
 pub mod link_buffer;
 pub mod macro_assembler;
